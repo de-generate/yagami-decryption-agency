@@ -5,8 +5,8 @@ use dialoguer::{Confirm, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use spinners::{Spinner, Spinners};
 
-const CHARA_KEY: &[u8; 512] = include_bytes!("keys/chara_key.bin");
-const CHARA2_KEY: &[u8; 512] = include_bytes!("keys/chara2_key.bin");
+const CHARA_KEY: &'static [u8; 512] = include_bytes!("keys/chara_key.bin");
+const CHARA2_KEY: &'static [u8; 512] = include_bytes!("keys/chara2_key.bin");
 
 #[derive(Parser)]
 #[clap(name = "yagami-decryption-agency")]
