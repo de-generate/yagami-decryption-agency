@@ -252,6 +252,6 @@ fn main() {
 
     println!();
     println!("Finished.");
-
-    press_btn_continue::wait("Press any key to continue...").unwrap();
+    println!("Press ENTER to continue...");
+    std::io::stdin().read(&mut [0]).unwrap();
 }
