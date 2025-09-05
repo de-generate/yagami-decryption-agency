@@ -1,6 +1,7 @@
-use std::{convert::TryInto, fs, io::Write, path::PathBuf};
+use std::{convert::TryInto, fs, io::Read, path::PathBuf};
 
 use clap::{CommandFactory, Parser, ValueEnum};
+use dialoguer::{Confirm, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use spinners::{Spinner, Spinners};
 
@@ -22,11 +23,11 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Operation mode.
-    #[clap(arg_enum, value_parser, default_value = "auto")]
+    #[clap(value_enum, value_parser, default_value = "auto")]
     mode: Mode,
 
     /// Type of the encrypted PAR file.
-    #[clap(arg_enum, value_parser, default_value = "auto")]
+    #[clap(value_enum, value_parser, default_value = "auto")]
     par_type: ParType,
 
     /// Overwrite files without asking.
@@ -58,75 +59,81 @@ enum ParType {
     Chara2,
 }
 
-fn xor(data: &mut Vec<u8>, key: &[u8]) {
+fn xor(data: &mut Vec<u8>, key: &[u8; 512]) {
     let mut key = key.iter().cycle();
 
     println!("Performing XOR...");
     let bar = ProgressBar::new(data.len() as u64)
         .with_style(ProgressStyle::with_template("{bar:50.cyan/blue} [{percent}%]").unwrap());
 
-    data.iter_mut().enumerate().for_each(|(i, b)| {
+    for (i, byte) in data.iter_mut().enumerate() {
         if i % (1024 * 1024) == 0 {
             bar.inc(1024 * 1024);
         }
-        *b ^= key.next().unwrap();
-    });
+
+        *byte ^= key.next().unwrap();
+    }
 
     bar.finish();
-    println!();
-    println!();
+    println!("\n");
 }
 
-fn rotate(data: &mut Vec<u8>, left: bool) {
-    let rotate_dir = if left {
-        |value: u64, i: u32| value.rotate_left(i)
-    } else {
-        |value: u64, i: u32| value.rotate_right(i)
-    };
-
+fn rotate<const LEFT: bool>(data: &mut Vec<u8>) {
     println!("Rotating bits...");
     let bar = ProgressBar::new(data.len() as u64)
         .with_style(ProgressStyle::with_template("{bar:50.cyan/blue} [{percent}%]").unwrap());
 
-    for (i, c) in data.chunks_mut(8).enumerate() {
+    for (i, chunk) in data.chunks_mut(8).enumerate() {
         if (i % (1024 * 1024 / 8)) == 0 {
             bar.inc(1024 * 1024);
         }
 
-        let mut value = u64::from_le_bytes(c.try_into().unwrap());
-        value = rotate_dir(value, (i % 64) as u32);
-        c.copy_from_slice(&value.to_le_bytes());
+        let value = u64::from_le_bytes(chunk.try_into().unwrap());
+        let value_rotated = if LEFT {
+            value.rotate_left((i % 64) as u32)
+        } else {
+            value.rotate_left((i % 64) as u32)
+        };
+
+        chunk.copy_from_slice(&value_rotated.to_le_bytes());
     }
 
     bar.finish();
-    println!();
-    println!();
+    println!("\n");
+}
+
+fn rotate_left(data: &mut Vec<u8>) {
+    rotate::<true>(data)
+}
+
+fn rotate_right(data: &mut Vec<u8>) {
+    rotate::<false>(data)
 }
 
 fn pad(data: &mut Vec<u8>) {
     let rem = data.len() % 8;
     if rem != 0 {
-        data.write_all(&vec![0; 8 - rem]).unwrap();
+        data.resize(data.len() - rem + 8, 0);
     }
 }
 
-fn decrypt(mut data: Vec<u8>, key: &[u8]) -> Vec<u8> {
-    println!("Decrypting...");
-    println!();
+fn decrypt(mut data: Vec<u8>, key: &[u8; 512]) -> Vec<u8> {
+    println!("Decrypting...\n");
 
     xor(&mut data, key);
     pad(&mut data);
-    rotate(&mut data, true);
+    rotate_left(&mut data);
+
     data
 }
 
-fn encrypt(mut data: Vec<u8>, key: &[u8]) -> Vec<u8> {
-    println!("Encrypting...");
-    println!();
+fn encrypt(mut data: Vec<u8>, key: &[u8; 512]) -> Vec<u8> {
+    println!("Encrypting...\n");
 
     pad(&mut data);
-    rotate(&mut data, false);
+    rotate_right(&mut data);
     xor(&mut data, key);
+
     data
 }
 
@@ -134,9 +141,11 @@ fn main() {
     let mut args = Args::parse();
 
     // Print header
-    print!("{}", Args::command().render_version());
-    println!("{}", Args::command().get_author().unwrap());
-    println!();
+    print!(
+        "{}{}\n",
+        Args::command().render_version(),
+        Args::command().get_author().unwrap()
+    );
 
     if let Mode::Auto = args.mode {
         let file_name = args
@@ -153,7 +162,7 @@ fn main() {
         } else {
             println!("Unable to determine operation mode.");
             println!("Select a mode:");
-            args.mode = match dialoguer::Select::new()
+            args.mode = match Select::new()
                 .items(&["Encrypt", "Decrypt"])
                 .clear(false)
                 .interact()
@@ -171,71 +180,61 @@ fn main() {
     sp.stop_with_newline();
 
     let key = match args.par_type {
-        ParType::Auto => {
-            // let magic: Vec<&u8> = par.iter().take(4).collect();
-
-            match &par[0..4] {
-                b"\xAC\xC5\x8B\x99" => CHARA_KEY,
-                b"\x01\x6E\x58\xE4" => CHARA2_KEY,
-                _ => {
-                    println!();
-                    println!("Unable to determine PAR type.");
-                    println!("Select a type:");
-                    match dialoguer::Select::new()
-                        .items(&["chara.par", "chara2.par"])
-                        .clear(false)
-                        .interact()
-                        .expect("PAR type needs to be selected")
-                    {
-                        0 => CHARA_KEY,
-                        1 => CHARA2_KEY,
-                        _ => panic!("Unexpected selection."),
-                    }
+        ParType::Auto => match &par[0..4] {
+            b"\xAC\xC5\x8B\x99" => CHARA_KEY,
+            b"\x01\x6E\x58\xE4" => CHARA2_KEY,
+            _ => {
+                println!();
+                println!("Unable to determine PAR type.");
+                println!("Select a type:");
+                match Select::new()
+                    .items(&["chara.par", "chara2.par"])
+                    .clear(false)
+                    .interact()
+                    .expect("PAR type needs to be selected")
+                {
+                    0 => CHARA_KEY,
+                    1 => CHARA2_KEY,
+                    _ => panic!("Unexpected selection."),
                 }
             }
-        }
+        },
         ParType::Chara => CHARA_KEY,
         ParType::Chara2 => CHARA2_KEY,
     };
 
-    let output_extension: &str;
-    let result = match args.mode {
-        Mode::Decrypt => {
-            output_extension = "decrypted.par";
-            decrypt(par, key)
-        }
-        Mode::Encrypt => {
-            output_extension = "par";
-            encrypt(par, key)
-        }
+    let (result, output_extension) = match args.mode {
+        Mode::Decrypt => (decrypt(par, key), "decrypted.par"),
+        Mode::Encrypt => (encrypt(par, key), "par"),
         _ => unreachable!(),
     };
 
-    let mut output: PathBuf;
-    if let Some(output_path) = args.output {
-        output = output_path;
-    } else {
-        output = args.input.clone();
+    let output = match args.output {
+        Some(output) => output,
+        None => {
+            let mut output = args.input.clone();
 
-        if args.mode == Mode::Encrypt && output.extension().is_some() {
-            output.set_file_name(
-                output
-                    .file_stem()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .replace(".decrypted.par", ".par"),
-            );
+            if args.mode == Mode::Encrypt && output.extension().is_some() {
+                output.set_file_name(
+                    output
+                        .file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace(".decrypted.par", ".par"),
+                );
+            }
+
+            output.set_extension(output_extension);
+            output
         }
-
-        output.set_extension(output_extension);
-    }
+    };
 
     println!("Writing file to {:?}", &output);
 
     if !args.overwrite
         && output.is_file()
-        && !dialoguer::Confirm::new()
+        && !Confirm::new()
             .with_prompt("File already exists. Overwrite?")
             .interact()
             .unwrap_or(false)
