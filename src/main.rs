@@ -92,7 +92,7 @@ fn rotate<const LEFT: bool>(data: &mut Vec<u8>) {
         let value_rotated = if LEFT {
             value.rotate_left((i % 64) as u32)
         } else {
-            value.rotate_left((i % 64) as u32)
+            value.rotate_right((i % 64) as u32)
         };
 
         chunk.copy_from_slice(&value_rotated.to_le_bytes());
