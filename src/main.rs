@@ -1,8 +1,14 @@
-use std::{convert::TryInto, fs, io::Read, path::PathBuf};
+#![feature(iter_array_chunks)]
 
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    path::PathBuf,
+};
+
+use bytemuck::cast_slice;
 use clap::{CommandFactory, Parser, ValueEnum};
 use dialoguer::{Confirm, Select};
-use indicatif::{ProgressBar, ProgressStyle};
 use spinners::{Spinner, Spinners};
 
 const CHARA_KEY: &'static [u8; 512] = include_bytes!("keys/chara_key.bin");
@@ -33,6 +39,10 @@ struct Args {
     /// Overwrite files without asking.
     #[clap(short, long, action)]
     overwrite: bool,
+
+    /// Skip asking to press ENTER when done.
+    #[clap(short, long, action)]
+    quick_exit: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -59,110 +69,70 @@ enum ParType {
     Chara2,
 }
 
-fn xor(data: &mut Vec<u8>, key: &[u8; 512]) {
-    let mut key = key.iter().cycle();
+fn process<T, U, const DECRYPT: bool>(reader: T, mut writer: U, key: &'static [u8; 512])
+where
+    T: Read,
+    U: Write,
+{
+    let mut key = cast_slice::<_, u64>(key).iter().cycle();
 
-    println!("Performing XOR...");
-    let bar = ProgressBar::new(data.len() as u64)
-        .with_style(ProgressStyle::with_template("{bar:50.cyan/blue} [{percent}%]").unwrap());
-
-    for (i, byte) in data.iter_mut().enumerate() {
-        if i % (1024 * 1024) == 0 {
-            bar.inc(1024 * 1024);
-        }
-
-        *byte ^= key.next().unwrap();
-    }
-
-    bar.finish();
-    println!("\n");
-}
-
-fn rotate<const LEFT: bool>(data: &mut Vec<u8>) {
-    println!("Rotating bits...");
-    let bar = ProgressBar::new(data.len() as u64)
-        .with_style(ProgressStyle::with_template("{bar:50.cyan/blue} [{percent}%]").unwrap());
-
-    for (i, chunk) in data.chunks_mut(8).enumerate() {
-        if (i % (1024 * 1024 / 8)) == 0 {
-            bar.inc(1024 * 1024);
-        }
-
-        let value = u64::from_le_bytes(chunk.try_into().unwrap());
-        let value_rotated = if LEFT {
-            value.rotate_left((i % 64) as u32)
+    for val in reader
+        .bytes()
+        .map(|byte| byte.unwrap())
+        .array_chunks::<8>()
+        .map(|bytes| u64::from_le_bytes(bytes) ^ key.next().unwrap())
+        .enumerate()
+        .map(if DECRYPT {
+            |(i, val): (usize, u64)| val.rotate_left((i % 64) as u32)
         } else {
-            value.rotate_right((i % 64) as u32)
-        };
-
-        chunk.copy_from_slice(&value_rotated.to_le_bytes());
-    }
-
-    bar.finish();
-    println!("\n");
-}
-
-fn rotate_left(data: &mut Vec<u8>) {
-    rotate::<true>(data)
-}
-
-fn rotate_right(data: &mut Vec<u8>) {
-    rotate::<false>(data)
-}
-
-fn pad(data: &mut Vec<u8>) {
-    let rem = data.len() % 8;
-    if rem != 0 {
-        data.resize(data.len() - rem + 8, 0);
+            |(i, val): (usize, u64)| val.rotate_right((i % 64) as u32)
+        })
+    {
+        writer.write(&val.to_le_bytes()).unwrap();
     }
 }
 
-fn decrypt(mut data: Vec<u8>, key: &[u8; 512]) -> Vec<u8> {
-    println!("Decrypting...\n");
-
-    xor(&mut data, key);
-    pad(&mut data);
-    rotate_left(&mut data);
-
-    data
+fn encrypt<T, U>(reader: T, writer: U, key: &'static [u8; 512])
+where
+    T: Read,
+    U: Write,
+{
+    process::<_, _, false>(reader, writer, key);
 }
 
-fn encrypt(mut data: Vec<u8>, key: &[u8; 512]) -> Vec<u8> {
-    println!("Encrypting...\n");
-
-    pad(&mut data);
-    rotate_right(&mut data);
-    xor(&mut data, key);
-
-    data
+fn decrypt<T, U>(reader: T, writer: U, key: &'static [u8; 512])
+where
+    T: Read,
+    U: Write,
+{
+    process::<_, _, true>(reader, writer, key);
 }
 
 fn main() {
-    let mut args = Args::parse();
+    let args = Args::parse();
 
-    // Print header
-    print!(
-        "{}{}\n",
+    println!(
+        "{}{}",
         Args::command().render_version(),
         Args::command().get_author().unwrap()
     );
 
-    if let Mode::Auto = args.mode {
-        let file_name = args
-            .input
+    let input = args.input;
+
+    let mode = if let Mode::Auto = args.mode {
+        let input_file_name = input
             .file_name()
-            .expect("Invalid path")
+            .expect("Invalid inputpath")
             .to_str()
             .unwrap_or_default();
 
-        if file_name.ends_with(".decrypted.par") {
-            args.mode = Mode::Encrypt;
-        } else if file_name.ends_with(".par") {
-            args.mode = Mode::Decrypt;
+        if input_file_name.ends_with(".decrypted.par") {
+            Mode::Encrypt
+        } else if input_file_name.ends_with(".par") {
+            Mode::Decrypt
         } else {
-            println!("Unable to determine operation mode.");
-            println!("Select a mode:");
-            args.mode = match Select::new()
+            match Select::new()
+                .with_prompt("Unable to determine operation mode.\nSelect a mode:")
                 .items(&["Encrypt", "Decrypt"])
                 .clear(false)
                 .interact()
@@ -170,51 +140,19 @@ fn main() {
             {
                 0 => Mode::Encrypt,
                 1 => Mode::Decrypt,
-                _ => panic!("Unexpected selection."),
-            };
-        }
-    }
-
-    let mut sp = Spinner::new(Spinners::Line, "Reading file...".into());
-    let par = fs::read(&args.input).expect("Could not read file");
-    sp.stop_with_newline();
-
-    let key = match args.par_type {
-        ParType::Auto => match &par[0..4] {
-            b"\xAC\xC5\x8B\x99" => CHARA_KEY,
-            b"\x01\x6E\x58\xE4" => CHARA2_KEY,
-            _ => {
-                println!();
-                println!("Unable to determine PAR type.");
-                println!("Select a type:");
-                match Select::new()
-                    .items(&["chara.par", "chara2.par"])
-                    .clear(false)
-                    .interact()
-                    .expect("PAR type needs to be selected")
-                {
-                    0 => CHARA_KEY,
-                    1 => CHARA2_KEY,
-                    _ => panic!("Unexpected selection."),
-                }
+                _ => unreachable!(),
             }
-        },
-        ParType::Chara => CHARA_KEY,
-        ParType::Chara2 => CHARA2_KEY,
-    };
-
-    let (result, output_extension) = match args.mode {
-        Mode::Decrypt => (decrypt(par, key), "decrypted.par"),
-        Mode::Encrypt => (encrypt(par, key), "par"),
-        _ => unreachable!(),
+        }
+    } else {
+        args.mode
     };
 
     let output = match args.output {
         Some(output) => output,
         None => {
-            let mut output = args.input.clone();
+            let mut output = input.clone();
 
-            if args.mode == Mode::Encrypt && output.extension().is_some() {
+            if mode == Mode::Encrypt && output.extension().is_some() {
                 output.set_file_name(
                     output
                         .file_stem()
@@ -225,12 +163,15 @@ fn main() {
                 );
             }
 
-            output.set_extension(output_extension);
+            output.set_extension(match mode {
+                Mode::Encrypt => "par",
+                Mode::Decrypt => "decrypted.par",
+                Mode::Auto => unreachable!(),
+            });
+
             output
         }
     };
-
-    println!("Writing file to {:?}", &output);
 
     if !args.overwrite
         && output.is_file()
@@ -243,14 +184,64 @@ fn main() {
         return;
     }
 
-    println!();
+    let mut input_file = File::open(&input).unwrap();
+    let mut magic_buf = [0; 4];
+    input_file.read_exact(&mut magic_buf).unwrap();
+    input_file.seek(SeekFrom::Start(0)).unwrap();
 
-    let mut sp = Spinner::new(Spinners::Line, "Writing file...".into());
-    fs::write(&output, result).expect("Could not write file");
-    sp.stop_with_newline();
+    let key = match args.par_type {
+        ParType::Chara => CHARA_KEY,
+        ParType::Chara2 => CHARA2_KEY,
+        ParType::Auto => match &magic_buf {
+            b"\xAC\xC5\x8B\x99" => CHARA_KEY,
+            b"\x01\x6E\x58\xE4" => CHARA2_KEY,
+            _ => {
+                match Select::new()
+                    .with_prompt("Unable to determine PAR type.\nSelect a type:")
+                    .items(&["chara.par", "chara2.par"])
+                    .clear(false)
+                    .interact()
+                    .expect("PAR type needs to be selected")
+                {
+                    0 => CHARA_KEY,
+                    1 => CHARA2_KEY,
+                    _ => unreachable!(),
+                }
+            }
+        },
+    };
+
+    let mode_text = match mode {
+        Mode::Encrypt => "encrypting".to_string(),
+        Mode::Decrypt => "decrypting".to_string(),
+        _ => unreachable!(),
+    };
+
+    println!(
+        "
+{mode_text} {input:?}
+writing output to {output:?}
+    "
+    );
+
+    let mut spinner = Spinner::new(Spinners::Line, format!("{mode_text}..."));
+
+    let reader = BufReader::with_capacity(8 * 1024 * 1024, input_file);
+    let writer = BufWriter::with_capacity(8 * 1024 * 1024, File::create(output).unwrap());
+
+    match mode {
+        Mode::Encrypt => encrypt(reader, writer, key),
+        Mode::Decrypt => decrypt(reader, writer, key),
+        _ => unreachable!(),
+    }
+
+    spinner.stop_with_newline();
 
     println!();
     println!("Finished.");
-    println!("Press ENTER to continue...");
-    std::io::stdin().read(&mut [0]).unwrap();
+
+    if !args.quick_exit {
+        println!("Press ENTER to continue...");
+        std::io::stdin().read(&mut [0]).unwrap();
+    }
 }
