@@ -69,11 +69,11 @@ enum ParType {
     Chara2,
 }
 
-fn process<T, U, const DECRYPT: bool>(reader: T, mut writer: U, key: &'static [u8; 512])
-where
-    T: Read,
-    U: Write,
-{
+fn process<const DECRYPT: bool>(
+    reader: impl Read,
+    mut writer: impl Write,
+    key: &'static [u8; 512],
+) {
     let mut key = cast_slice::<_, u64>(key).iter().cycle();
 
     for val in reader
@@ -92,20 +92,12 @@ where
     }
 }
 
-fn encrypt<T, U>(reader: T, writer: U, key: &'static [u8; 512])
-where
-    T: Read,
-    U: Write,
-{
-    process::<_, _, false>(reader, writer, key);
+fn encrypt(reader: impl Read, writer: impl Write, key: &'static [u8; 512]) {
+    process::<false>(reader, writer, key);
 }
 
-fn decrypt<T, U>(reader: T, writer: U, key: &'static [u8; 512])
-where
-    T: Read,
-    U: Write,
-{
-    process::<_, _, true>(reader, writer, key);
+fn decrypt(reader: impl Read, writer: impl Write, key: &'static [u8; 512]) {
+    process::<true>(reader, writer, key);
 }
 
 fn main() {
