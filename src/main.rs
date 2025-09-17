@@ -1,24 +1,26 @@
 #![feature(iter_array_chunks)]
 
+mod array_chunks_pad;
+use array_chunks_pad::ArrayChunksPadExtension;
+
+use bytemuck::cast_slice;
+use clap::{CommandFactory, Parser, ValueEnum};
+use dialoguer::{Confirm, Select};
+use spinners::{Spinner, Spinners};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
 
-use bytemuck::cast_slice;
-use clap::{CommandFactory, Parser, ValueEnum};
-use dialoguer::{Confirm, Select};
-use spinners::{Spinner, Spinners};
-
 const CHARA_KEY: &'static [u8; 512] = include_bytes!("keys/chara_key.bin");
 const CHARA2_KEY: &'static [u8; 512] = include_bytes!("keys/chara2_key.bin");
 
+const READ_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
 #[derive(Parser)]
-#[clap(name = "yagami-decryption-agency")]
-#[clap(author = "SutandoTsukai181")]
-#[clap(version = "0.1.0")]
-#[clap(about = "Decrypts/encrypts Judgment and Lost Judgment PC chara.par archives", long_about = None)]
+#[command(author, version, about)]
 struct Args {
     /// Path to input file.
     #[clap(value_parser)]
@@ -69,49 +71,56 @@ enum ParType {
     Chara2,
 }
 
-fn process<const DECRYPT: bool>(
-    reader: impl Read,
-    mut writer: impl Write,
-    key: &'static [u8; 512],
-) {
-    let mut key = cast_slice::<_, u64>(key).iter().cycle();
-
+fn encrypt<R, W, K>(reader: R, mut writer: W, mut key: K)
+where
+    R: Read,
+    W: Write,
+    K: Iterator<Item = &'static u64>,
+{
     for val in reader
         .bytes()
         .map(|byte| byte.unwrap())
-        .array_chunks::<8>()
-        .map(|bytes| u64::from_le_bytes(bytes) ^ key.next().unwrap())
+        .array_chunks_pad::<8>(0)
         .enumerate()
-        .map(if DECRYPT {
-            |(i, val): (usize, u64)| val.rotate_left((i % 64) as u32)
-        } else {
-            |(i, val): (usize, u64)| val.rotate_right((i % 64) as u32)
+        .map(|(i, bytes)| {
+            u64::from_le_bytes(bytes).rotate_right((i % 64) as u32) ^ key.next().unwrap()
         })
     {
         writer.write(&val.to_le_bytes()).unwrap();
     }
 }
 
-fn encrypt(reader: impl Read, writer: impl Write, key: &'static [u8; 512]) {
-    process::<false>(reader, writer, key);
-}
-
-fn decrypt(reader: impl Read, writer: impl Write, key: &'static [u8; 512]) {
-    process::<true>(reader, writer, key);
+fn decrypt<R, W, K>(reader: R, mut writer: W, mut key: K)
+where
+    R: Read,
+    W: Write,
+    K: Iterator<Item = &'static u64>,
+{
+    for val in reader
+        .bytes()
+        .map(|byte| byte.unwrap())
+        .array_chunks_pad::<8>(0)
+        .enumerate()
+        .map(|(i, bytes)| {
+            (u64::from_le_bytes(bytes) ^ key.next().unwrap()).rotate_left((i % 64) as u32)
+        })
+    {
+        writer.write(&val.to_le_bytes()).unwrap();
+    }
 }
 
 fn main() {
     let args = Args::parse();
 
     println!(
-        "{}{}",
+        "{}{}\n",
         Args::command().render_version(),
         Args::command().get_author().unwrap()
     );
 
     let input = args.input;
 
-    let mode = if let Mode::Auto = args.mode {
+    let mode = if args.mode == Mode::Auto {
         let input_file_name = input
             .file_name()
             .expect("Invalid inputpath")
@@ -218,8 +227,9 @@ writing output to {output:?}
 
     let mut spinner = Spinner::new(Spinners::Line, format!("{mode_text}..."));
 
-    let reader = BufReader::with_capacity(8 * 1024 * 1024, input_file);
-    let writer = BufWriter::with_capacity(8 * 1024 * 1024, File::create(output).unwrap());
+    let reader = BufReader::with_capacity(READ_BUFFER_SIZE, input_file);
+    let writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, File::create(output).unwrap());
+    let key = cast_slice::<_, u64>(key).iter().cycle();
 
     match mode {
         Mode::Encrypt => encrypt(reader, writer, key),

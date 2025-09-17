@@ -1,6 +1,8 @@
 [package]
 name = "yagami-decryption-agency"
+authors = ["SutandoTsukai181", "de_generate"]
 version = "0.2.0"
+description = "Decrypts/encrypts Judgment and Lost Judgment PC chara.par archives"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
