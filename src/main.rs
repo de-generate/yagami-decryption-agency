@@ -1,8 +1,4 @@
-#![feature(iter_array_chunks)]
-
-mod array_chunks_pad;
 use array_chunks_pad::ArrayChunksPadExtension;
-
 use bytemuck::cast_slice;
 use clap::{CommandFactory, Parser, ValueEnum};
 use dialoguer::{Confirm, Select};

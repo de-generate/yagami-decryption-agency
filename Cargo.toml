@@ -1,6 +1,6 @@
 [package]
 name = "yagami-decryption-agency"
-authors = ["SutandoTsukai181", "de_generate"]
+authors = ["SutandoTsukai181", "de-generate"]
 version = "0.2.0"
 description = "Decrypts/encrypts Judgment and Lost Judgment PC chara.par archives"
 edition = "2024"
@@ -8,6 +8,7 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+array-chunks-pad = { git = "https://github.com/de-generate/array-chunks-pad", branch = "main" }
 bytemuck = "1.23.2"
 clap = { version = "4.5.47", features = ["derive"] }
 dialoguer = "0.12.0"

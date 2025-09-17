@@ -53,6 +53,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "array-chunks-pad"
+version = "0.1.0"
+source = "git+https://github.com/de-generate/array-chunks-pad?branch=main#3abc2f45690b2959f377228fc532863558c3d9bd"
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,6 +465,7 @@ checksum = "271414315aff87387382ec3d271b52d7ae78726f5d44ac98b4f4030c91880486"
 name = "yagami-decryption-agency"
 version = "0.2.0"
 dependencies = [
+ "array-chunks-pad",
  "bytemuck",
  "clap",
  "dialoguer",
